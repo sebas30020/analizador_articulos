@@ -93,6 +93,48 @@ def clean_markdown_latex(text):
     text = re.sub(r'(?m)^\[', '{[}', text)
     return text
 
+def heal_latex_images(latex_text, images_dir):
+    """Post-procesa el LaTeX para curar extensiones erróneas u omitir imágenes no encontradas."""
+    figure_pattern = re.compile(r"\\begin\{figure\}(?:\[.*?\])?(.*?)\\end\{figure\}", re.DOTALL)
+    include_pattern = re.compile(r"\\includegraphics(?:\[.*?\])?\{(.*?)\}")
+    
+    def replace_figure(match):
+        full_figure_block = match.group(0)
+        figure_content = match.group(1)
+        
+        img_match = include_pattern.search(figure_content)
+        if not img_match:
+            return full_figure_block
+            
+        img_path_str = img_match.group(1)
+        img_path = Path(img_path_str)
+        filename = img_path.name
+        
+        actual_path = images_dir / filename
+        if actual_path.exists():
+            return full_figure_block
+            
+        stem = img_path.stem
+        found_file = None
+        for ext in ['.png', '.jpeg', '.jpg', '.pdf']:
+            possible_path = images_dir / f"{stem}{ext}"
+            if possible_path.exists():
+                found_file = possible_path
+                break
+                
+        if found_file:
+            new_img_path_str = str(img_path.parent / found_file.name).replace('\\', '/')
+            new_figure_content = figure_content.replace(img_path_str, new_img_path_str)
+            prefix = full_figure_block[:full_figure_block.find(figure_content)]
+            suffix = full_figure_block[full_figure_block.find(figure_content) + len(figure_content):]
+            print(f"[Curador de LaTeX] Extensión corregida: {img_path_str} -> {new_img_path_str}")
+            return prefix + new_figure_content + suffix
+        else:
+            print(f"[Curador de LaTeX] Figura omitida (no existe el archivo en disco): {img_path_str}")
+            return f"% [Imagen omitida porque no se encontró el archivo: {filename}]"
+            
+    return figure_pattern.sub(replace_figure, latex_text)
+
 def extract_images_from_pdf(pdf_path, file_hash):
     """Extrae imágenes del PDF usando PyMuPDF y las guarda localmente."""
     if not fitz:
@@ -182,18 +224,18 @@ def analyze_pdf(client, pdf_path, file_hash, model_name="gemini-2.5-flash", mock
             "   - Discusión o análisis crítico\n"
             "   - Conclusiones o implicaciones\n"
             "   - Síntesis final (máximo 5 líneas)\n"
-            "4. IMÁGENES: He adjuntado al prompt varias imágenes extraídas del PDF original. "
-            "Revisa el PDF, identifica qué imágenes o figuras son las más representativas e importantes, "
-            "y asócialas con las imágenes adjuntas. Cuando menciones una figura importante en tu resumen, "
-            "inclúyela explícitamente en el código LaTeX usando su nombre de archivo original. "
-            "Para insertar una imagen, usa EXACTAMENTE este formato: \n"
-            "\\begin{figure}[H]\n"
-            "\\centering\n"
-            "\\includegraphics[width=0.8\\textwidth]{images/NOMBRE_ARCHIVO_AQUI}\n"
-            "\\caption{Descripción de la imagen según el documento}\n"
-            "\\label{fig:NOMBRE_ARCHIVO_AQUI}\n"
-            "\\end{figure}\n"
-            "Asegúrate de nombrarlas y referenciarlas en el texto explicativo obligatoriamente usando \\ref{fig:NOMBRE_ARCHIVO_AQUI}.\n\n"
+            "4. IMÁGENES: He adjuntado al prompt varias imágenes extraídas del PDF original.\n"
+            "   - Revisa el PDF, identifica qué imágenes o figuras son las más representativas e importantes, y asócialas con las imágenes de la lista adjunta.\n"
+            "   - Está ESTRICTAMENTE PROHIBIDO usar o inventar nombres de archivo que no aparezcan en la lista 'Nombres de las imágenes extraídas disponibles'.\n"
+            "   - Si una figura del artículo es importante pero NO está en la lista de imágenes extraídas disponibles (por ejemplo, porque es un gráfico vectorial y no se extrajo como imagen), NO debes incluirla con \\includegraphics. Puedes hacer referencia a ella en el texto, pero sin el bloque \\begin{figure}...\\end{figure}.\n"
+            "   - Para insertar una imagen de la lista, usa EXACTAMENTE este formato, respetando la extensión exacta (png, jpeg, etc.) indicada en la lista:\n"
+            "     \\begin{figure}[H]\n"
+            "     \\centering\n"
+            "     \\includegraphics[width=0.8\\textwidth]{images/NOMBRE_ARCHIVO_AQUI}\n"
+            "     \\caption{Descripción de la imagen según el documento}\n"
+            "     \\label{fig:NOMBRE_ARCHIVO_AQUI}\n"
+            "     \\end{figure}\n"
+            "   - Cuando te refieras a una de estas figuras en el texto, utiliza obligatoriamente la referencia de LaTeX: \\ref{fig:NOMBRE_ARCHIVO_AQUI}.\n\n"
             f"Nombres de las imágenes extraídas disponibles:\n" + "\n".join(uploaded_images_info) + "\n\n"
             "--- INSTRUCCIÓN DE FORMATO LATEX ---\n"
             "Tu respuesta debe ser EXCLUSIVAMENTE código LaTeX válido, listo para integrarse en un documento general.\n"
@@ -260,6 +302,8 @@ def generate_full_report(registry, active_pdfs):
             
         with open(summary_file, "r", encoding="utf-8") as f:
             summary_text = f.read()
+            
+        summary_text = heal_latex_images(summary_text, IMAGES_DIR)
             
         body_content += f"\\newpage\n"
         body_content += f"% --- Inicio del documento: {escape_latex(pdf_filename)} ---\n"
@@ -356,6 +400,8 @@ def main():
             safe_name = "".join(c for c in pdf_filename if c.isalnum() or c in (".", "_", "-")).rstrip(".")
             fragment_filename = f"{file_hash}_{safe_name}.tex"
             fragment_path = SUMMARIES_DIR / fragment_filename
+            
+            latex_summary = heal_latex_images(latex_summary, IMAGES_DIR)
             
             with open(fragment_path, "w", encoding="utf-8") as f:
                 f.write(latex_summary)
